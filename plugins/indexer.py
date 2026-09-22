@@ -26,7 +26,7 @@ def extract_only_bold_title(message: Message) -> str:
     
     return None
 
-# Automatic Live Indexer from Channels
+# Automatic Live Indexer from Channels (Real-Time listener)
 @Client.on_message(filters.channel & (filters.text | filters.caption))
 async def auto_channel_indexer(client: Client, message: Message):
     title = extract_only_bold_title(message) or (message.text or message.caption or "").split("\n")[0].strip()
@@ -37,7 +37,7 @@ async def auto_channel_indexer(client: Client, message: Message):
     if post_link:
         await save_post(message.chat.id, message.id, title, post_link)
 
-# Manual Batch Indexer (Admins Only)
+# Manual Batch Indexer using ID Range Fetching (Bot API Compatible)
 @Client.on_message(filters.group & filters.command("index"))
 async def batch_index_handler(client: Client, message: Message):
     try:
@@ -57,6 +57,8 @@ async def batch_index_handler(client: Client, message: Message):
             link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
 
+    channel_id = conn["channel_id"]
+
     status = await message.reply_text(
         to_small_caps("indexing channel posts... please wait."),
         link_preview_options=LinkPreviewOptions(is_disabled=True)
@@ -67,40 +69,58 @@ async def batch_index_handler(client: Client, message: Message):
     skipped_count = 0
 
     try:
-        async for msg in client.get_chat_history(conn["channel_id"], limit=500):
-            total_scanned += 1
+        # 1. लेटेस्ट मैसेज ID प्राप्त करें
+        dummy_msg = await client.send_message(channel_id, "🔍 Indexing Sync...")
+        latest_id = dummy_msg.id
+        await dummy_msg.delete()
+
+        # 2. BOT_METHOD_INVALID से बचने के लिए Message IDs की लिस्ट बनाकर get_messages का उपयोग करें
+        chunk_size = 100
+        for start_id in range(1, latest_id + 1, chunk_size):
+            message_ids = list(range(start_id, min(start_id + chunk_size, latest_id + 1)))
             
-            if not (msg.text or msg.caption):
-                skipped_count += 1
+            try:
+                messages = await client.get_messages(channel_id, message_ids)
+            except RPCError:
                 continue
 
-            # Pehle Bold title check karega, agar bold nahi hai toh pehli line le lega
-            title = extract_only_bold_title(msg) or (msg.text or msg.caption).split("\n")[0].strip()
-            
-            if title and msg.link:
-                await save_post(conn["channel_id"], msg.id, title, msg.link)
-                saved_count += 1
-            else:
-                skipped_count += 1
+            for msg in messages:
+                if not msg or msg.empty:
+                    continue
+                
+                total_scanned += 1
 
-            # Har 15 posts ke baad live counter status message update karega
-            if total_scanned % 15 == 0:
-                try:
-                    await status.edit_text(
-                        f"🔄 **{to_small_caps('indexing in progress...')}**\n\n"
-                        f"📊 **{to_small_caps('scanned:')}** `{total_scanned}`\n"
-                        f"✅ **{to_small_caps('saved:')}** `{saved_count}`\n"
-                        f"⏭️ **{to_small_caps('skipped:')}** `{skipped_count}`",
-                        link_preview_options=LinkPreviewOptions(is_disabled=True)
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(1)
+                if not (msg.text or msg.caption):
+                    skipped_count += 1
+                    continue
+
+                # पहले Bold टाइटल चेक करें, न होने पर पहली लाइन लें
+                title = extract_only_bold_title(msg) or (msg.text or msg.caption).split("\n")[0].strip()
+                
+                if title and msg.link:
+                    await save_post(channel_id, msg.id, title, msg.link)
+                    saved_count += 1
+                else:
+                    skipped_count += 1
+
+            # लाइव प्रोग्रेस अपडेट (हर 100 मैसेज स्कैन पर)
+            try:
+                await status.edit_text(
+                    f"🔄 **{to_small_caps('indexing in progress...')}**\n\n"
+                    f"📊 **{to_small_caps('scanned:')}** `{total_scanned}`\n"
+                    f"✅ **{to_small_caps('saved:')}** `{saved_count}`\n"
+                    f"⏭️ **{to_small_caps('skipped:')}** `{skipped_count}`",
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+            except Exception:
+                pass
+
+            await asyncio.sleep(1) # Rate Limit सेफ्टी डिले
 
         summary_text = (
-            f"✅ **{to_small_caps('indexing completed!')}**\n\n"
+            f"📌 **{to_small_caps('indexing completed!')}**\n\n"
             f"📊 **{to_small_caps('total scanned:')}** `{total_scanned}`\n"
-            f"📌 **{to_small_caps('posts indexed:')}** `{saved_count}`\n"
+            f"✅ **{to_small_caps('posts indexed:')}** `{saved_count}`\n"
             f"⏭️ **{to_small_caps('skipped:')}** `{skipped_count}`"
         )
 
@@ -119,11 +139,6 @@ async def batch_index_handler(client: Client, message: Message):
         await asyncio.sleep(e.value)
         await status.edit_text(
             f"⚠️ Telegram FloodWait: Retrying in {e.value} seconds.",
-            link_preview_options=LinkPreviewOptions(is_disabled=True)
-        )
-    except RPCError as e:
-        await status.edit_text(
-            f"❌ Bot is not Admin in channel or lacks permissions.\nError: `{str(e)}`",
             link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
     except Exception as e:
