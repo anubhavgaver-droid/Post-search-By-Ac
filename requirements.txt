@@ -3,4 +3,5 @@ tgcrypto
 motor
 pymongo
 aiohttp
+rapidfuzz
 dnspython
